@@ -1,4 +1,4 @@
--- StarScript SPTS v1.1
+-- SPTS SUPREME v4.0
 -- Focused on safer UI loading, stronger automation, and a cleaner release layout.
 
 local function tryGetService(name)
@@ -89,9 +89,12 @@ end
 local function loadRayfield()
     local loaders = {
         {
-            label = "local bundled UI",
+            label = "local StarRayfield",
             load = function()
                 local candidates = {
+                    "api/connection/StarRayfield.lua",
+                    "./api/connection/StarRayfield.lua",
+                    "Scipts/api/connection/StarRayfield.lua",
                     "api/connection/UI.lua",
                     "./api/connection/UI.lua",
                     "Scipts/api/connection/UI.lua",
@@ -125,7 +128,10 @@ local function loadRayfield()
         {
             label = "single-file fallback",
             load = function()
-                local chunk, err = loadRemoteChunk("https://raw.githubusercontent.com/mohamadusmanov216-spec/StarScript/main/api/connection/UI.lua")
+                local chunk, err = loadRemoteChunk("https://raw.githubusercontent.com/mohamadusmanov216-spec/StarScript/main/api/connection/StarRayfield.lua")
+                if not chunk then
+                    chunk, err = loadRemoteChunk("https://raw.githubusercontent.com/mohamadusmanov216-spec/StarScript/main/api/connection/UI.lua")
+                end
                 if not chunk then
                     error(err)
                 end
@@ -145,7 +151,7 @@ local function loadRayfield()
         errors[#errors + 1] = loader.label .. ": " .. tostring(result)
     end
 
-    error("Failed to load Rayfield in single-file mode.\n" .. table.concat(errors, "\n"))
+    error("Failed to load StarRayfield in single-file mode.\n" .. table.concat(errors, "\n"))
 end
 
 local Players = game:GetService("Players")
@@ -204,6 +210,14 @@ local pools = {
     ["5. 10m"] = Vector3.new(-2051, 714, -1893),
 }
 
+local poolTiers = {
+    {name = "1. 100", threshold = 100},
+    {name = "2. 10k", threshold = 10000},
+    {name = "3. 100k", threshold = 100000},
+    {name = "4. 1m", threshold = 1000000},
+    {name = "5. 10m", threshold = 10000000},
+}
+
 local strengthLocations = {
     ["Normal Rock"] = Vector3.new(403, 249, 988),
     ["Blue Crystal"] = Vector3.new(-2275, 1943, 1051),
@@ -239,6 +253,8 @@ local strengthBurstSliderRef
 local psychicBurstSliderRef
 local clickBurstSliderRef
 local positionLockSliderRef
+local cachedAutoPoolInfo = nil
+local lastAutoPoolScanAt = 0
 
 local function safeNotify(options)
     if not Rayfield or type(Rayfield.Notify) ~= "function" then
@@ -350,6 +366,238 @@ local function safeTeleport(position)
     end
 
     return ok
+end
+
+local shortNumberSuffixes = {
+    {suffix = "Dc", value = 1e33},
+    {suffix = "No", value = 1e30},
+    {suffix = "Oc", value = 1e27},
+    {suffix = "Sp", value = 1e24},
+    {suffix = "Sx", value = 1e21},
+    {suffix = "Qi", value = 1e18},
+    {suffix = "Qa", value = 1e15},
+    {suffix = "T", value = 1e12},
+    {suffix = "B", value = 1e9},
+    {suffix = "M", value = 1e6},
+    {suffix = "K", value = 1e3},
+}
+
+local parseNumberSuffixes = {
+    k = 1e3,
+    m = 1e6,
+    b = 1e9,
+    t = 1e12,
+    qa = 1e15,
+    qi = 1e18,
+    sx = 1e21,
+    sp = 1e24,
+    oc = 1e27,
+    no = 1e30,
+    dc = 1e33,
+}
+
+local function formatShortNumber(value)
+    if type(value) ~= "number" then
+        return tostring(value or "Unknown")
+    end
+
+    local absoluteValue = math.abs(value)
+    if absoluteValue < 1000 then
+        return tostring(math.floor(value + 0.5))
+    end
+
+    for _, entry in ipairs(shortNumberSuffixes) do
+        if absoluteValue >= entry.value then
+            local scaled = value / entry.value
+            if math.abs(scaled) >= 100 then
+                return string.format("%.0f%s", scaled, entry.suffix)
+            end
+
+            if math.abs(scaled) >= 10 then
+                return string.format("%.1f%s", scaled, entry.suffix)
+            end
+
+            return string.format("%.2f%s", scaled, entry.suffix)
+        end
+    end
+
+    return tostring(math.floor(value + 0.5))
+end
+
+local function parseNumericValue(rawValue)
+    if type(rawValue) == "number" then
+        return rawValue
+    end
+
+    if type(rawValue) ~= "string" then
+        return nil
+    end
+
+    local normalized = string.lower(rawValue)
+    normalized = normalized:gsub(",", "")
+    normalized = normalized:gsub("%s+", "")
+
+    local directNumber = tonumber(normalized)
+    if directNumber then
+        return directNumber
+    end
+
+    local amountText, suffix = normalized:match("^([%+%-]?%d*%.?%d+)([a-z]+)$")
+    if not amountText or not suffix then
+        return nil
+    end
+
+    local amount = tonumber(amountText)
+    local multiplier = parseNumberSuffixes[suffix]
+    if not amount or not multiplier then
+        return nil
+    end
+
+    return amount * multiplier
+end
+
+local function getPoolStatScore(object)
+    if not object then
+        return 0
+    end
+
+    local score = 0
+    local current = object
+    local depth = 0
+
+    while current and depth < 4 do
+        local name = string.upper(current.Name or "")
+
+        if string.find(name, "BODY", 1, true) then
+            score = score + 80
+        end
+        if string.find(name, "TOUGH", 1, true) then
+            score = score + 80
+        end
+        if string.find(name, "DURAB", 1, true) then
+            score = score + 75
+        end
+        if string.find(name, "DEFEN", 1, true) then
+            score = score + 50
+        end
+        if string.find(name, "STRENGTH", 1, true) then
+            score = score + 40
+        end
+        if string.find(name, "POWER", 1, true) then
+            score = score + 25
+        end
+        if string.find(name, "STAT", 1, true) then
+            score = score + 12
+        end
+        if string.find(name, "DATA", 1, true) then
+            score = score + 12
+        end
+
+        current = current.Parent
+        depth = depth + 1
+    end
+
+    return score
+end
+
+local function detectBestPoolStat()
+    local bestMatch = nil
+
+    for _, object in ipairs(LocalPlayer:GetDescendants()) do
+        if object:IsA("IntValue") or object:IsA("NumberValue") or object:IsA("StringValue") then
+            local numericValue = parseNumericValue(object.Value)
+            local score = getPoolStatScore(object)
+
+            if numericValue and numericValue >= 0 and score > 0 then
+                if not bestMatch
+                    or score > bestMatch.score
+                    or (score == bestMatch.score and numericValue > bestMatch.value) then
+                    bestMatch = {
+                        instance = object,
+                        name = object.Name,
+                        value = numericValue,
+                        score = score,
+                    }
+                end
+            end
+        end
+    end
+
+    return bestMatch
+end
+
+local function getPoolTierForValue(statValue)
+    local resolvedTier = poolTiers[1]
+
+    if type(statValue) ~= "number" then
+        return resolvedTier
+    end
+
+    for _, tier in ipairs(poolTiers) do
+        if statValue >= tier.threshold then
+            resolvedTier = tier
+        else
+            break
+        end
+    end
+
+    return resolvedTier
+end
+
+local function resolveAutoPoolInfo(forceRefresh)
+    local now = os.clock()
+    if not forceRefresh and cachedAutoPoolInfo and (now - lastAutoPoolScanAt) < 0.75 then
+        return cachedAutoPoolInfo
+    end
+
+    local detectedStat = detectBestPoolStat()
+    local statValue = detectedStat and detectedStat.value or nil
+    local tier = getPoolTierForValue(statValue)
+    local targetName = tier and tier.name or selectedPool
+    local targetPosition = pools[targetName]
+
+    selectedPool = targetName or selectedPool
+    cachedAutoPoolInfo = {
+        targetName = targetName,
+        targetPosition = targetPosition,
+        statName = detectedStat and detectedStat.name or "Unknown",
+        statValue = statValue,
+        foundStat = detectedStat ~= nil,
+    }
+    lastAutoPoolScanAt = now
+
+    return cachedAutoPoolInfo
+end
+
+local function showCurrentCoordinates()
+    local _, _, rootPart = getCharacterParts()
+    if not rootPart then
+        safeNotify({
+            Title = "Coordinates",
+            Content = "Character position is not available right now.",
+            Duration = 3,
+        })
+        return
+    end
+
+    local position = rootPart.Position
+    local vectorText = string.format("Vector3.new(%.1f, %.1f, %.1f)", position.X, position.Y, position.Z)
+    local notifyText = string.format("X %.1f | Y %.1f | Z %.1f", position.X, position.Y, position.Z)
+
+    print("[SPTS] Current coordinates: " .. vectorText)
+
+    if setclipboard then
+        pcall(function()
+            setclipboard(vectorText)
+        end)
+        notifyText = notifyText .. " | Copied"
+    end
+
+    safeNotify({
+        Title = "Coordinates",
+        Content = notifyText,
+        Duration = 5,
+    })
 end
 
 local function findToolByName(toolName)
@@ -649,8 +897,11 @@ local function restoreAutomationPosition()
         return
     end
 
-    if autoPool and pools[selectedPool] then
-        safeTeleport(pools[selectedPool])
+    if autoPool then
+        local poolInfo = resolveAutoPoolInfo(true)
+        if poolInfo and poolInfo.targetPosition then
+            safeTeleport(poolInfo.targetPosition)
+        end
     end
 end
 
@@ -847,7 +1098,7 @@ local function maintainCharacterState()
 end
 
 if type(Rayfield) ~= "table" or type(Rayfield.CreateWindow) ~= "function" then
-    error("Rayfield did not load a valid library object.")
+    error("StarRayfield did not load a valid library object.")
 end
 
 local windowOk, Window = pcall(function()
@@ -870,7 +1121,7 @@ local windowOk, Window = pcall(function()
 end)
 
 if not windowOk or not Window then
-    error("Rayfield window could not be created: " .. tostring(Window))
+    error("StarRayfield window could not be created: " .. tostring(Window))
 end
 
 pcall(function()
@@ -976,23 +1227,24 @@ poolToggleRef = FarmTab:CreateToggle({
         autoPool = value
         if value then
             disableOtherFarmModes("pool")
+            local poolInfo = resolveAutoPoolInfo(true)
             safeNotify({
                 Title = "Auto Pool",
-                Content = "Target: " .. selectedPool,
+                Content = poolInfo and string.format(
+                    "Target: %s | Stat: %s (%s)",
+                    tostring(poolInfo.targetName or selectedPool),
+                    tostring(poolInfo.statName or "Unknown"),
+                    formatShortNumber(poolInfo.statValue)
+                ) or ("Target: " .. selectedPool),
                 Duration = 2,
             })
         end
     end,
 })
 
-FarmTab:CreateDropdown({
-    Name = "Pool Target",
-    Options = poolOptions,
-    CurrentOption = {selectedPool},
-    Flag = "pool_target",
-    Callback = function(option)
-        selectedPool = resolveSingleOption(option, selectedPool)
-    end,
+FarmTab:CreateParagraph({
+    Title = "Auto Pool Target",
+    Content = "Pool zone is now chosen automatically from your current stat. Example: 999k -> 100k zone, 1m -> 1m zone.",
 })
 
 FarmTab:CreateSection("Strength")
@@ -1214,6 +1466,15 @@ for name, position in pairs(teleportLocations) do
     })
 end
 
+TeleportTab:CreateSection("Coordinates")
+
+TeleportTab:CreateButton({
+    Name = "Show My Coordinates",
+    Callback = function()
+        showCurrentCoordinates()
+    end,
+})
+
 local UtilityTab = Window:CreateTab("Utility", 3943728921)
 UtilityTab:CreateSection("Quality")
 
@@ -1381,11 +1642,12 @@ end)
 
 task.spawn(function()
     while scriptRunning do
-        if autoPool and isAlive() and pools[selectedPool] then
+        if autoPool and isAlive() then
             local _, _, rootPart = getCharacterParts()
-            local target = pools[selectedPool]
+            local poolInfo = resolveAutoPoolInfo()
+            local target = poolInfo and poolInfo.targetPosition or nil
 
-            if rootPart and (rootPart.Position - target).Magnitude > positionLockRadius then
+            if rootPart and target and (rootPart.Position - target).Magnitude > positionLockRadius then
                 safeTeleport(target)
             end
         end
@@ -1468,7 +1730,7 @@ task.delay(0.5, function()
 end)
 
 safeNotify({
-    Title = "StarScript SPTS v1.1",
+    Title = "SPTS SUPREME v4.0",
     Content = "Loaded successfully. Start with Ultra Farm Preset, then tune bursts if the server begins to throttle.",
     Duration = 6,
 })
